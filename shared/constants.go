@@ -7,17 +7,16 @@ const (
 
 // Queue and Exchange Configuration
 const (
-	WorkingExchange = "working_exchange"
-	WorkQueue       = "work_queue"
-	WorkRoutingKey  = "work"
-	DirectExchange  = "direct"
+	WorkingExchange    = "working_exchange"
+	WorkQueue          = "work_queue"
+	WorkRoutingKey     = "work"
+	ExchangeTypeDirect = "direct"
 )
 
 // Content Types
 const (
 	JSONContentType = "application/json"
 )
-
 
 // Application Configuration
 const (

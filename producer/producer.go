@@ -47,13 +47,13 @@ func (p *Producer) Close() {
 func (p *Producer) ProduceMessages(ctx context.Context, count int) error {
 	// Declare the working exchange
 	err := p.channel.ExchangeDeclare(
-		shared.WorkingExchange, // name
-		shared.DirectExchange,  // type
-		true,                   // durable
-		false,                  // auto-deleted
-		false,                  // internal
-		false,                  // no-wait
-		nil,                    // arguments
+		shared.WorkingExchange,    // name
+		shared.ExchangeTypeDirect, // type
+		true,                      // durable
+		false,                     // auto-deleted
+		false,                     // internal
+		false,                     // no-wait
+		nil,                       // arguments
 	)
 	if err != nil {
 		return fmt.Errorf("failed to declare working exchange: %w", err)

@@ -17,8 +17,8 @@ import (
 // Constants for configuration
 const (
 	// Exchange types
-	RetryExchange = "retry_exchange"
-	TopicExchange = "topic"
+	RetryExchange     = "retry_exchange"
+	ExchangeTypeRetry = "topic"
 
 	// Consumer-specific retry configuration
 	BaseRetryDelayMs   = 1000
@@ -77,13 +77,13 @@ func (c *Consumer) setupInfrastructure() error {
 func (c *Consumer) setupExchanges() error {
 	// Set up working exchange
 	err := c.channel.ExchangeDeclare(
-		shared.WorkingExchange, // name
-		shared.DirectExchange,  // type
-		true,                   // durable
-		false,                  // auto-deleted
-		false,                  // internal
-		false,                  // no-wait
-		nil,                    // arguments
+		shared.WorkingExchange,    // name
+		shared.ExchangeTypeDirect, // type
+		true,                      // durable
+		false,                     // auto-deleted
+		false,                     // internal
+		false,                     // no-wait
+		nil,                       // arguments
 	)
 	if err != nil {
 		return fmt.Errorf("failed to declare working exchange: %w", err)
@@ -91,13 +91,13 @@ func (c *Consumer) setupExchanges() error {
 
 	// Set up retry exchange
 	err = c.channel.ExchangeDeclare(
-		RetryExchange, // name
-		TopicExchange, // type
-		true,          // durable
-		false,         // auto-deleted
-		false,         // internal
-		false,         // no-wait
-		nil,           // arguments
+		RetryExchange,     // name
+		ExchangeTypeRetry, // type
+		true,              // durable
+		false,             // auto-deleted
+		false,             // internal
+		false,             // no-wait
+		nil,               // arguments
 	)
 	if err != nil {
 		return fmt.Errorf("failed to declare retry exchange: %w", err)
