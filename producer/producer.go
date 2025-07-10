@@ -45,43 +45,18 @@ func (p *Producer) Close() {
 }
 
 func (p *Producer) ProduceMessages(ctx context.Context, count int) error {
-	// Declare the working exchange
+	// Declare the working exchange as topic type
 	err := p.channel.ExchangeDeclare(
-		shared.WorkingExchange,    // name
-		shared.ExchangeTypeDirect, // type
-		true,                      // durable
-		false,                     // auto-deleted
-		false,                     // internal
-		false,                     // no-wait
-		nil,                       // arguments
+		shared.ExchangeNameTransaction, // name
+		shared.ExchangeTypeTopic,       // type
+		true,                           // durable
+		false,                          // auto-deleted
+		false,                          // internal
+		false,                          // no-wait
+		nil,                            // arguments
 	)
 	if err != nil {
 		return fmt.Errorf("failed to declare working exchange: %w", err)
-	}
-
-	// Declare the work queue
-	_, err = p.channel.QueueDeclare(
-		shared.WorkQueue, // name
-		true,             // durable
-		false,            // delete when unused
-		false,            // exclusive
-		false,            // no-wait
-		nil,              // arguments
-	)
-	if err != nil {
-		return fmt.Errorf("failed to declare work queue: %w", err)
-	}
-
-	// Bind the queue to the exchange
-	err = p.channel.QueueBind(
-		shared.WorkQueue,       // queue name
-		shared.WorkRoutingKey,  // routing key
-		shared.WorkingExchange, // exchange
-		false,                  // no-wait
-		nil,                    // arguments
-	)
-	if err != nil {
-		return fmt.Errorf("failed to bind queue: %w", err)
 	}
 
 	// Send messages
@@ -99,10 +74,10 @@ func (p *Producer) ProduceMessages(ctx context.Context, count int) error {
 
 		err = p.channel.PublishWithContext(
 			ctx,
-			shared.WorkingExchange, // exchange
-			shared.WorkRoutingKey,  // routing key
-			false,                  // mandatory
-			false,                  // immediate
+			shared.ExchangeNameTransaction,   // exchange
+			shared.TopicTransactionProcessed, // routing key
+			false,                            // mandatory
+			false,                            // immediate
 			amqp.Publishing{
 				ContentType: shared.JSONContentType,
 				Body:        body,

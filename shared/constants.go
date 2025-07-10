@@ -7,10 +7,17 @@ const (
 
 // Queue and Exchange Configuration
 const (
-	WorkingExchange    = "working_exchange"
-	WorkQueue          = "work_queue"
-	WorkRoutingKey     = "work"
-	ExchangeTypeDirect = "direct"
+	ExchangeNameTransaction = "TRANSACTION"
+	ExchangeTypeTopic       = "topic"
+
+	// Queue names
+	QueueOrderLedger  = "order-ledger"
+	QueueDataConsumer = "data-consumer"
+
+	// Routing keys
+	TopicTransactionProcessed             = "transaction.processed"               // For new messages
+	TopicTransactionProcessedOrderLedger  = "transaction.processed.order-ledger"  // For order-ledger retries
+	TopicTransactionProcessedDataConsumer = "transaction.processed.data-consumer" // For data-consumer retries
 )
 
 // Content Types

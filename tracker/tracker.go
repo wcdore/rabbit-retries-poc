@@ -2,7 +2,6 @@ package tracker
 
 import (
 	"fmt"
-	"strings"
 	"sync"
 	"time"
 
@@ -18,12 +17,17 @@ type MessageAttempt struct {
 }
 
 type MessageJourney struct {
-	MessageID    int
-	Attempts     []MessageAttempt
-	FinalStatus  string
-	TotalTime    time.Duration
-	StartTime    time.Time
+	MessageID   int
+	Attempts    []MessageAttempt
+	FinalStatus string
+	TotalTime   time.Duration
+	StartTime   time.Time
 }
+
+const (
+	// Column widths for report formatting
+	QueueJourneyColumnWidth = 54
+)
 
 type Tracker struct {
 	journeys map[int]*MessageJourney
@@ -39,7 +43,7 @@ func New() *Tracker {
 func (t *Tracker) StartMessage(messageID int) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	
+
 	t.journeys[messageID] = &MessageJourney{
 		MessageID: messageID,
 		Attempts:  []MessageAttempt{},
@@ -50,7 +54,7 @@ func (t *Tracker) StartMessage(messageID int) {
 func (t *Tracker) RecordAttempt(messageID int, queue string, result string, timeInQueue time.Duration, retryCount int) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	
+
 	if journey, exists := t.journeys[messageID]; exists {
 		attempt := MessageAttempt{
 			Timestamp:   time.Now(),
@@ -60,7 +64,7 @@ func (t *Tracker) RecordAttempt(messageID int, queue string, result string, time
 			RetryCount:  retryCount,
 		}
 		journey.Attempts = append(journey.Attempts, attempt)
-		
+
 		if result == "success" || retryCount >= shared.MaxRetries {
 			journey.FinalStatus = result
 			journey.TotalTime = time.Since(journey.StartTime)
@@ -71,54 +75,69 @@ func (t *Tracker) RecordAttempt(messageID int, queue string, result string, time
 func (t *Tracker) PrintReport() {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
-	
+
 	fmt.Println("\n=== Message Journey Report ===")
-	fmt.Printf("%-10s | %-8s | %-13s | %-70s | %-30s\n", 
-		"Message ID", "Attempts", "Final Status", "Queue Journey", "Time in Queues")
-	fmt.Println(strings.Repeat("-", 140))
-	
+	fmt.Printf("%-10s | %-8s | %-20s | %-*s | %-30s\n",
+		"Message ID", "Attempts", "Final Status", QueueJourneyColumnWidth, "Queue Journey", "Time in Queues")
+	// Match the separator line from the user's output
+	fmt.Println("-----------------------------------------------------------------------------------------------------------------------------------------------------")
+
+	// Iterate through messages in numerical order
 	for i := 1; i <= shared.DefaultMessageCount; i++ {
-		if journey, exists := t.journeys[i]; exists {
-			queueJourney := ""
-			timeInQueues := ""
-			
-			for j, attempt := range journey.Attempts {
-				if j > 0 {
-					queueJourney += " → "
-					timeInQueues += ", "
-				}
-				queueJourney += attempt.Queue
-				timeInQueues += fmt.Sprintf("%dms", attempt.TimeInQueue.Milliseconds())
-			}
-			
-			// Truncate queue journey if too long
-			if len(queueJourney) > 70 {
-				queueJourney = queueJourney[:67] + "..."
-			}
-			
-			finalStatus := journey.FinalStatus
-			if finalStatus == "" {
-				finalStatus = "In Progress"
-			} else if finalStatus == "failure" && len(journey.Attempts) >= 6 {
-				finalStatus = "Failed (Max Retries)"
-			} else if finalStatus == "success" {
-				finalStatus = "Success"
-			}
-			
-			fmt.Printf("%-10d | %-8d | %-13s | %-70s | %-30s\n",
-				journey.MessageID,
-				len(journey.Attempts),
-				finalStatus,
-				queueJourney,
-				timeInQueues)
+		journey, exists := t.journeys[i]
+		if !exists {
+			continue
 		}
+		queueJourney := ""
+		timeInQueues := ""
+
+		// Build the queue journey
+		for j, attempt := range journey.Attempts {
+			if j > 0 {
+				queueJourney += " → "
+			}
+			queueJourney += attempt.Queue
+		}
+
+		// If queueJourney is too long, truncate it
+		runes := []rune(queueJourney)
+		if len(runes) > QueueJourneyColumnWidth {
+			queueJourney = string(runes[:QueueJourneyColumnWidth])
+		}
+
+		// Build time in queues for ALL attempts
+		for j, attempt := range journey.Attempts {
+			if j > 0 {
+				timeInQueues += ", "
+			}
+			timeInQueues += fmt.Sprintf("%dms", attempt.TimeInQueue.Milliseconds())
+		}
+
+		finalStatus := journey.FinalStatus
+		if finalStatus == "" {
+			finalStatus = "In Progress"
+		} else if finalStatus == "failure" && len(journey.Attempts) > shared.MaxRetries {
+			finalStatus = "Failed (Max Retries)"
+		} else if finalStatus == "success" {
+			finalStatus = "Success"
+		} else if finalStatus == "failure" {
+			finalStatus = "Failed"
+		}
+
+		fmt.Printf("%-10d | %-8d | %-20s | %-*s | %-30s\n",
+			journey.MessageID,
+			len(journey.Attempts),
+			finalStatus,
+			QueueJourneyColumnWidth,
+			queueJourney,
+			timeInQueues)
 	}
-	
+
 	fmt.Println("\n=== Summary ===")
 	successCount := 0
 	failureCount := 0
 	totalAttempts := 0
-	
+
 	for _, journey := range t.journeys {
 		totalAttempts += len(journey.Attempts)
 		if journey.FinalStatus == "success" {
@@ -127,7 +146,7 @@ func (t *Tracker) PrintReport() {
 			failureCount++
 		}
 	}
-	
+
 	fmt.Printf("Total Messages: %d\n", len(t.journeys))
 	fmt.Printf("Successful: %d\n", successCount)
 	fmt.Printf("Failed: %d\n", failureCount)
@@ -138,16 +157,16 @@ func (t *Tracker) PrintReport() {
 func (t *Tracker) AllMessagesProcessed() bool {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
-	
+
 	if len(t.journeys) < shared.DefaultMessageCount {
 		return false
 	}
-	
+
 	for _, journey := range t.journeys {
 		if journey.FinalStatus == "" {
 			return false
 		}
 	}
-	
+
 	return true
 }

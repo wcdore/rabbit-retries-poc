@@ -159,11 +159,92 @@ The POC uses the following configuration:
 - **Exponential Backoff**: 1s × 2^(retry_count)
 - **Queue Auto-Delete**: TTL + 10 seconds
 
+## Multiple Consumer Pattern and Retry Isolation
+
+When implementing this retry pattern with multiple consumers, there's a critical challenge: preventing retry messages from being delivered to unintended queues. If not handled properly, when a message from one queue is retried, it could be delivered to ALL queues bound to the same routing key, causing duplicate processing.
+
+### The Problem
+
+Without proper isolation:
+
+1. Producer publishes to `transaction.processed`
+2. Both `order-ledger` and `data-consumer` queues receive the message
+3. When `order-ledger` fails and retries a message, the retry could go to BOTH queues
+4. `data-consumer` would receive duplicate messages on each retry attempt
+
+### Solution Options
+
+#### Option 1: Message Headers for Queue Targeting (Not Used)
+
+- Add headers indicating the intended queue
+- Use header-based routing
+- **Pros**: Flexible, supports dynamic queue addition
+- **Cons**: More complex exchange configuration
+
+#### Option 2: Separate Retry Infrastructure per Queue (Current Implementation)
+
+- Each queue gets its own retry routing pattern
+- Retry messages are routed back only to their originating queue
+- **Pros**: Complete isolation, no cross-contamination, different retry policies per queue
+- **Cons**: More infrastructure complexity
+
+#### Option 3: Direct Queue-to-Queue Dead Lettering (Not Used)
+
+- Configure dead-letter messages to go directly to specific queues
+- **Pros**: Most precise control
+- **Cons**: Tighter coupling, less flexible
+
+### Current Implementation Details
+
+This POC uses **Option 2** with the following approach:
+
+1. **Initial Message Flow**:
+   - Producer publishes to `TRANSACTION` exchange with routing key `transaction.processed`
+   - Both queues (`order-ledger` and `data-consumer`) receive all messages
+
+2. **Retry Isolation**:
+   - Each queue has queue-specific retry routing keys:
+     - `order-ledger` uses: `retry.order-ledger.1000`, `retry.order-ledger.2000`, etc.
+     - `data-consumer` uses: `retry.data-consumer.1000`, `retry.data-consumer.2000`, etc.
+   - Retry queues are named with queue prefix: `order-ledger_retry_1000ms`, `data-consumer_retry_1000ms`
+   - Dead-letter routing keys are queue-specific: `transaction.processed.order-ledger`
+
+3. **Benefits**:
+   - Complete retry isolation between consumers
+   - No duplicate messages during retries
+   - Each queue can have different retry policies
+   - Clear separation of concerns
+
 ## RabbitMQ Management
 
 Access the RabbitMQ management interface at http://localhost:15672
 - Username: guest
 - Password: guest
+
+## Testing
+
+The project includes comprehensive tests for the table formatting logic:
+
+```bash
+# Run all tests
+./test.sh
+
+# Run specific test suites
+go test ./tracker -v                           # All tracker tests
+go test ./tracker -run TestQueueJourneyTruncation -v  # Test truncation logic
+go test ./tracker -run TestTableAlignment -v          # Test column alignment
+go test ./tracker -run TestQueueJourneyColumnWidth -v # Test width constraints
+go test ./tracker -run TestRealWorldScenarios -v      # Test realistic scenarios
+
+# Run tests with coverage
+go test ./tracker -cover -v
+```
+
+The tests verify:
+- Queue journey truncation at appropriate boundaries
+- Consistent column alignment across all rows
+- Proper handling of the QueueJourneyColumnWidth constant
+- Real-world retry scenarios with various queue lengths
 
 ## Clean Up
 

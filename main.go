@@ -39,8 +39,9 @@ func main() {
 		rabbitURL = DefaultRabbitMQURL
 	}
 
-	// Create tracker
-	msgTracker := tracker.New()
+	// Create separate trackers for each queue
+	orderLedgerTracker := tracker.New()
+	dataConsumerTracker := tracker.New()
 
 	// Create context for graceful shutdown
 	ctx, cancel := context.WithCancel(context.Background())
@@ -54,21 +55,34 @@ func main() {
 	log.Println("Waiting for RabbitMQ to be ready...")
 	time.Sleep(RabbitMQWaitTime)
 
-	// Create and start consumer
-	c, err := consumer.New(rabbitURL, msgTracker)
+	// Create and start order-ledger consumer (33% success rate)
+	orderLedgerConsumer, err := consumer.New(rabbitURL, orderLedgerTracker, shared.QueueOrderLedger, 0.33)
 	if err != nil {
-		log.Fatalf("Failed to create consumer: %v", err)
+		log.Fatalf("Failed to create order-ledger consumer: %v", err)
 	}
-	defer c.Close()
+	defer orderLedgerConsumer.Close()
 
-	// Start consumer in background
+	// Create and start data-consumer (100% success rate)
+	dataConsumer, err := consumer.New(rabbitURL, dataConsumerTracker, shared.QueueDataConsumer, 1.0)
+	if err != nil {
+		log.Fatalf("Failed to create data-consumer: %v", err)
+	}
+	defer dataConsumer.Close()
+
+	// Start both consumers in background
 	go func() {
-		if err := c.Consume(ctx); err != nil {
-			log.Printf("Consumer error: %v", err)
+		if err := orderLedgerConsumer.Consume(ctx); err != nil {
+			log.Printf("Order-ledger consumer error: %v", err)
 		}
 	}()
 
-	// Give consumer time to start
+	go func() {
+		if err := dataConsumer.Consume(ctx); err != nil {
+			log.Printf("Data-consumer error: %v", err)
+		}
+	}()
+
+	// Give consumers time to start
 	time.Sleep(ConsumerStartWait)
 
 	// Create producer
@@ -90,7 +104,8 @@ func main() {
 	done := make(chan bool)
 	go func() {
 		for {
-			if msgTracker.AllMessagesProcessed() {
+			// Check if both trackers have processed all messages
+			if orderLedgerTracker.AllMessagesProcessed() && dataConsumerTracker.AllMessagesProcessed() {
 				done <- true
 				return
 			}
@@ -107,8 +122,12 @@ func main() {
 		log.Println("Timeout: Not all messages were processed within timeout duration")
 	}
 
-	// Print the final report
-	msgTracker.PrintReport()
+	// Print both reports
+	log.Println("\n=== Order Ledger Queue Message Journey Report ===")
+	orderLedgerTracker.PrintReport()
+
+	log.Println("\n=== Data Consumer Queue Message Journey Report ===")
+	dataConsumerTracker.PrintReport()
 
 	// Give a moment for any final logs
 	time.Sleep(FinalLogsWait)

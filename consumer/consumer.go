@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"math/rand"
+	"strings"
 	"time"
 
 	"retries-poc/shared"
@@ -16,32 +17,32 @@ import (
 
 // Constants for configuration
 const (
-	// Exchange types
-	RetryExchange     = "retry_exchange"
-	ExchangeTypeRetry = "topic"
+	// Exchange
+	ExchangeNameRetry = "retry_exchange"
 
 	// Consumer-specific retry configuration
 	BaseRetryDelayMs   = 1000
-	RetryQueueExpireMs = 10000
-	SuccessRate        = 0.33
+	RetryQueueExpireMs = 10000 // How long the retry queue should exist after the last message is processed
 )
 
 // RabbitMQ Headers
 const (
-	RetryCountHeader     = "x-retry-count"
-	MessageTTLHeader     = "x-message-ttl"
-	DeadLetterExchange   = "x-dead-letter-exchange"
-	DeadLetterRoutingKey = "x-dead-letter-routing-key"
-	ExpiresHeader        = "x-expires"
+	HeaderRetryCount           = "x-retry-count"
+	HeaderMessageTTL           = "x-message-ttl"
+	HeaderDeadLetterExchange   = "x-dead-letter-exchange"
+	HeaderDeadLetterRoutingKey = "x-dead-letter-routing-key"
+	HeaderExpires              = "x-expires"
 )
 
 type Consumer struct {
-	conn    *amqp.Connection
-	channel *amqp.Channel
-	tracker *tracker.Tracker
+	conn        *amqp.Connection
+	channel     *amqp.Channel
+	tracker     *tracker.Tracker
+	queueName   string
+	successRate float64
 }
 
-func New(url string, tracker *tracker.Tracker) (*Consumer, error) {
+func New(url string, tracker *tracker.Tracker, queueName string, successRate float64) (*Consumer, error) {
 	conn, err := amqp.Dial(url)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to RabbitMQ: %w", err)
@@ -54,9 +55,11 @@ func New(url string, tracker *tracker.Tracker) (*Consumer, error) {
 	}
 
 	consumer := &Consumer{
-		conn:    conn,
-		channel: ch,
-		tracker: tracker,
+		conn:        conn,
+		channel:     ch,
+		tracker:     tracker,
+		queueName:   queueName,
+		successRate: successRate,
 	}
 
 	if err := consumer.setupInfrastructure(); err != nil {
@@ -75,15 +78,15 @@ func (c *Consumer) setupInfrastructure() error {
 }
 
 func (c *Consumer) setupExchanges() error {
-	// Set up working exchange
+	// Set up working exchange as topic
 	err := c.channel.ExchangeDeclare(
-		shared.WorkingExchange,    // name
-		shared.ExchangeTypeDirect, // type
-		true,                      // durable
-		false,                     // auto-deleted
-		false,                     // internal
-		false,                     // no-wait
-		nil,                       // arguments
+		shared.ExchangeNameTransaction, // name
+		shared.ExchangeTypeTopic,       // type
+		true,                           // durable
+		false,                          // auto-deleted
+		false,                          // internal
+		false,                          // no-wait
+		nil,                            // arguments
 	)
 	if err != nil {
 		return fmt.Errorf("failed to declare working exchange: %w", err)
@@ -91,13 +94,13 @@ func (c *Consumer) setupExchanges() error {
 
 	// Set up retry exchange
 	err = c.channel.ExchangeDeclare(
-		RetryExchange,     // name
-		ExchangeTypeRetry, // type
-		true,              // durable
-		false,             // auto-deleted
-		false,             // internal
-		false,             // no-wait
-		nil,               // arguments
+		ExchangeNameRetry,        // name
+		shared.ExchangeTypeTopic, // type
+		true,                     // durable
+		false,                    // auto-deleted
+		false,                    // internal
+		false,                    // no-wait
+		nil,                      // arguments
 	)
 	if err != nil {
 		return fmt.Errorf("failed to declare retry exchange: %w", err)
@@ -107,32 +110,48 @@ func (c *Consumer) setupExchanges() error {
 }
 
 func (c *Consumer) setupWorkQueue() error {
-	// Ensure work queue exists
+	// Ensure queue exists
 	_, err := c.channel.QueueDeclare(
-		shared.WorkQueue, // name
-		true,             // durable
-		false,            // delete when unused
-		false,            // exclusive
-		false,            // no-wait
-		nil,              // arguments
+		c.queueName, // name
+		true,        // durable
+		false,       // delete when unused
+		false,       // exclusive
+		false,       // no-wait
+		nil,         // arguments
 	)
 	if err != nil {
-		return fmt.Errorf("failed to declare work queue: %w", err)
+		return fmt.Errorf("failed to declare queue %s: %w", c.queueName, err)
 	}
 
-	// Bind work queue to working exchange
+	// Bind queue to working exchange for all new transactions
 	err = c.channel.QueueBind(
-		shared.WorkQueue,       // queue name
-		shared.WorkRoutingKey,  // routing key
-		shared.WorkingExchange, // exchange
-		false,                  // no-wait
-		nil,                    // arguments
+		c.queueName,                      // queue name
+		shared.TopicTransactionProcessed, // routing key for new messages
+		shared.ExchangeNameTransaction,   // exchange
+		false,                            // no-wait
+		nil,                              // arguments
 	)
 	if err != nil {
-		return fmt.Errorf("failed to bind work queue: %w", err)
+		return fmt.Errorf("failed to bind queue to transaction.processed: %w", err)
+	}
+
+	// Also bind to queue-specific retry routing key
+	err = c.channel.QueueBind(
+		c.queueName,                    // queue name
+		c.retryRoutingKey(),            // routing key for retries
+		shared.ExchangeNameTransaction, // exchange
+		false,                          // no-wait
+		nil,                            // arguments
+	)
+	if err != nil {
+		return fmt.Errorf("failed to bind queue to retry routing key: %w", err)
 	}
 
 	return nil
+}
+
+func (c *Consumer) retryRoutingKey() string {
+	return fmt.Sprintf("%s.%s", shared.TopicTransactionProcessed, c.queueName)
 }
 
 func (c *Consumer) Close() {
@@ -146,19 +165,19 @@ func (c *Consumer) Close() {
 
 func (c *Consumer) Consume(ctx context.Context) error {
 	msgs, err := c.channel.Consume(
-		shared.WorkQueue, // queue
-		"",               // consumer
-		false,            // auto-ack
-		false,            // exclusive
-		false,            // no-local
-		false,            // no-wait
-		nil,              // args
+		c.queueName, // queue
+		"",          // consumer
+		false,       // auto-ack
+		false,       // exclusive
+		false,       // no-local
+		false,       // no-wait
+		nil,         // args
 	)
 	if err != nil {
 		return fmt.Errorf("failed to register consumer: %w", err)
 	}
 
-	log.Println("Consumer started. Waiting for messages...")
+	log.Printf("Consumer for %s started. Waiting for messages...", c.queueName)
 
 	for {
 		select {
@@ -190,10 +209,10 @@ func (c *Consumer) processMessage(ctx context.Context, delivery amqp.Delivery) e
 		c.tracker.StartMessage(msg.ID)
 	}
 
-	queueName := determineQueueName(retryCount)
+	queueName := c.determineQueueName(retryCount)
 	timeInQueue := time.Since(msg.Timestamp)
 
-	if simulateProcessing() {
+	if c.simulateProcessing() {
 		return c.handleSuccess(msg, delivery, queueName, timeInQueue, retryCount)
 	}
 
@@ -205,38 +224,76 @@ func getRetryCount(headers amqp.Table) int {
 		return 0
 	}
 
-	if rc, ok := headers[RetryCountHeader]; ok {
-		if count, ok := rc.(int32); ok {
-			return int(count)
+	if rc, ok := headers[HeaderRetryCount]; ok {
+		switch v := rc.(type) {
+		case int32:
+			return int(v)
+		case int64:
+			return int(v)
+		case int:
+			return v
+		default:
+			log.Printf("WARNING: Unexpected retry count type: %T (value: %v)", rc, rc)
 		}
 	}
 
 	return 0
 }
 
-func determineQueueName(retryCount int) string {
+func (c *Consumer) determineQueueName(retryCount int) string {
 	if retryCount == 0 {
-		return shared.WorkQueue
+		return c.queueName
 	}
 
+	// This should match the logic in scheduleRetry which uses the previous retry count
+	// to determine which retry queue the message came from
 	ttl := calculateTTL(retryCount - 1)
-	return fmt.Sprintf("retry_queue_%dms", ttl)
+	return fmt.Sprintf("%s_retry_%dms", c.queueName, ttl)
 }
 
-func simulateProcessing() bool {
+func (c *Consumer) simulateProcessing() bool {
 	randomValue := rand.Float64()
-	return randomValue <= SuccessRate
+	return randomValue <= c.successRate
 }
 
 func (c *Consumer) handleSuccess(msg shared.Message, delivery amqp.Delivery, queueName string, timeInQueue time.Duration, retryCount int) error {
 	log.Printf("Message %d processed successfully after %d retries", msg.ID, retryCount)
-	c.tracker.RecordAttempt(msg.ID, queueName, "success", timeInQueue, retryCount)
+	c.tracker.RecordAttempt(msg.ID, abbreviatedQueueName(queueName), "success", timeInQueue, retryCount)
 	return delivery.Ack(false)
+}
+
+func abbreviatedQueueName(queueName string) string {
+	// Check if this is a retry queue
+	if !strings.Contains(queueName, "_retry_") {
+		return queueName // Return non-retry queues as-is
+	}
+
+	// Extract base queue name and delay
+	parts := strings.Split(queueName, "_retry_")
+	if len(parts) != 2 {
+		return queueName // Malformed, return as-is
+	}
+
+	baseQueue := parts[0]
+	delayPart := parts[1]
+
+	// Extract delay value (remove "ms" suffix)
+	delay := strings.TrimSuffix(delayPart, "ms")
+
+	// Get initials from base queue name
+	initials := ""
+	for _, word := range strings.Split(baseQueue, "-") {
+		if len(word) > 0 {
+			initials += string(word[0])
+		}
+	}
+
+	return initials + "-" + delay
 }
 
 func (c *Consumer) handleFailure(ctx context.Context, msg shared.Message, delivery amqp.Delivery, queueName string, timeInQueue time.Duration, retryCount int) error {
 	log.Printf("Message %d failed, retry count: %d", msg.ID, retryCount)
-	c.tracker.RecordAttempt(msg.ID, queueName, "failure", timeInQueue, retryCount)
+	c.tracker.RecordAttempt(msg.ID, abbreviatedQueueName(queueName), "failure", timeInQueue, retryCount)
 
 	if retryCount >= shared.MaxRetries {
 		log.Printf("Message %d exceeded max retries (%d), marking as failed", msg.ID, shared.MaxRetries)
@@ -248,6 +305,7 @@ func (c *Consumer) handleFailure(ctx context.Context, msg shared.Message, delive
 
 func (c *Consumer) scheduleRetry(ctx context.Context, msg shared.Message, delivery amqp.Delivery, retryCount int) error {
 	ttl := calculateTTL(retryCount)
+	retryQueueName := fmt.Sprintf("%s_retry_%dms", c.queueName, ttl)
 
 	// Create or ensure retry queue exists
 	if err := c.createRetryQueue(ttl); err != nil {
@@ -265,22 +323,22 @@ func (c *Consumer) scheduleRetry(ctx context.Context, msg shared.Message, delive
 		return delivery.Nack(false, true)
 	}
 
-	log.Printf("Message %d sent to retry_queue_%dms", msg.ID, ttl)
+	log.Printf("Message %d sent to %s (retry count: %d -> %d, TTL: %dms)", msg.ID, retryQueueName, retryCount, retryCount+1, ttl)
 	return delivery.Ack(false)
 }
 
 func (c *Consumer) publishToRetryQueue(ctx context.Context, body []byte, ttl, newRetryCount int) error {
 	return c.channel.PublishWithContext(
 		ctx,
-		RetryExchange,
-		fmt.Sprintf("retry.%d", ttl),
+		ExchangeNameRetry,
+		c.retryQueueRoutingKey(ttl),
 		false,
 		false,
 		amqp.Publishing{
 			ContentType: shared.JSONContentType,
 			Body:        body,
 			Headers: amqp.Table{
-				RetryCountHeader: int32(newRetryCount),
+				HeaderRetryCount: int32(newRetryCount),
 			},
 		},
 	)
@@ -296,13 +354,14 @@ func calculateTTL(retryCount int) int {
 }
 
 func (c *Consumer) createRetryQueue(ttl int) error {
-	queueName := fmt.Sprintf("retry_queue_%dms", ttl)
+	// Create unique retry queue names per consumer queue to avoid conflicts
+	queueName := fmt.Sprintf("%s_retry_%dms", c.queueName, ttl)
 
 	args := amqp.Table{
-		MessageTTLHeader:     int32(ttl),
-		DeadLetterExchange:   shared.WorkingExchange,
-		DeadLetterRoutingKey: shared.WorkRoutingKey,
-		ExpiresHeader:        int32(ttl + RetryQueueExpireMs), // Expire 10s after TTL
+		HeaderMessageTTL:           int32(ttl),
+		HeaderDeadLetterExchange:   shared.ExchangeNameTransaction,
+		HeaderDeadLetterRoutingKey: c.retryRoutingKey(),
+		HeaderExpires:              int32(ttl + RetryQueueExpireMs), // Queue expires 10s after TTL
 	}
 
 	_, err := c.channel.QueueDeclare(
@@ -317,11 +376,11 @@ func (c *Consumer) createRetryQueue(ttl int) error {
 		return fmt.Errorf("failed to declare retry queue %s: %w", queueName, err)
 	}
 
-	// Bind the retry queue to retry exchange
+	// Bind the retry queue to retry exchange with queue-specific routing key
 	err = c.channel.QueueBind(
 		queueName,
-		fmt.Sprintf("retry.%d", ttl),
-		RetryExchange,
+		c.retryQueueRoutingKey(ttl),
+		ExchangeNameRetry,
 		false,
 		nil,
 	)
@@ -330,4 +389,8 @@ func (c *Consumer) createRetryQueue(ttl int) error {
 	}
 
 	return nil
+}
+
+func (c *Consumer) retryQueueRoutingKey(ttl int) string {
+	return fmt.Sprintf("retry.%s.%d", c.queueName, ttl)
 }
