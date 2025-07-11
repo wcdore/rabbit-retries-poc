@@ -174,25 +174,27 @@ Without proper isolation:
 
 ### Solution Options
 
-#### Option 1: Message Headers for Queue Targeting (Not Used)
-
-- Add headers indicating the intended queue
-- Use header-based routing
-- **Pros**: Flexible, supports dynamic queue addition
-- **Cons**: More complex exchange configuration
-
-#### Option 2: Separate Retry Infrastructure per Queue (Current Implementation)
-
-- Each queue gets its own retry routing pattern
-- Retry messages are routed back only to their originating queue
-- **Pros**: Complete isolation, no cross-contamination, different retry policies per queue
-- **Cons**: More infrastructure complexity
-
-#### Option 3: Direct Queue-to-Queue Dead Lettering (Not Used)
+#### Option 1: Direct Queue-to-Queue Dead Lettering (Not Used)
 
 - Configure dead-letter messages to go directly to specific queues
 - **Pros**: Most precise control
 - **Cons**: Tighter coupling, less flexible
+
+#### Option 2: Shared Retry Queues with Routing Key Patterns (Current Implementation)
+
+- Shared retry queues used by all consumers (e.g., `retry_1000ms`, `retry_2000ms`)
+- Routing keys follow pattern: `retry.{ttl}.{queue}` (e.g., `retry.1000.order-ledger`)
+- Retry queues bind to wildcard pattern: `retry.{ttl}.*`
+- Dead letter routing remains queue-specific to ensure proper return path
+- **Pros**: Reduced infrastructure, proper isolation via routing, efficient resource usage
+- **Cons**: Slightly more complex routing logic
+
+#### Option 3: Message Headers for Queue Targeting (Not Used)
+
+- Add headers indicating the intended queue
+- Use header-based routing
+- **Pros**: Flexible, supports dynamic queue addition
+- **Cons**: More complex exchange configuration, requires producer awareness
 
 ### Current Implementation Details
 
@@ -202,18 +204,20 @@ This POC uses **Option 2** with the following approach:
    - Producer publishes to `TRANSACTION` exchange with routing key `transaction.processed`
    - Both queues (`order-ledger` and `data-consumer`) receive all messages
 
-2. **Retry Isolation**:
-   - Each queue has queue-specific retry routing keys:
-     - `order-ledger` uses: `retry.order-ledger.1000`, `retry.order-ledger.2000`, etc.
-     - `data-consumer` uses: `retry.data-consumer.1000`, `retry.data-consumer.2000`, etc.
-   - Retry queues are named with queue prefix: `order-ledger_retry_1000ms`, `data-consumer_retry_1000ms`
-   - Dead-letter routing keys are queue-specific: `transaction.processed.order-ledger`
+2. **Shared Retry Infrastructure**:
+   - Shared retry queues: `retry_1000ms`, `retry_2000ms`, `retry_4000ms`, `retry_8000ms`
+   - Routing keys follow pattern: `retry.{ttl}.{queue}`
+     - `order-ledger` uses: `retry.1000.order-ledger`, `retry.2000.order-ledger`, etc.
+     - `data-consumer` uses: `retry.1000.data-consumer`, `retry.2000.data-consumer`, etc.
+   - Each retry queue binds to wildcard pattern: `retry.1000.*`, `retry.2000.*`, etc.
+   - Dead-letter routing keys remain queue-specific: `transaction.processed.order-ledger`
 
 3. **Benefits**:
-   - Complete retry isolation between consumers
+   - Reduced infrastructure (N retry queues instead of N×M where M is number of consumers)
+   - Complete retry isolation between consumers via routing
    - No duplicate messages during retries
-   - Each queue can have different retry policies
-   - Clear separation of concerns
+   - Efficient resource utilization
+   - Easy to add new consumers without creating new retry queues
 
 ## RabbitMQ Management
 

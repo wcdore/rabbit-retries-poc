@@ -248,7 +248,7 @@ func (c *Consumer) determineQueueName(retryCount int) string {
 	// This should match the logic in scheduleRetry which uses the previous retry count
 	// to determine which retry queue the message came from
 	ttl := calculateTTL(retryCount - 1)
-	return fmt.Sprintf("%s_retry_%dms", c.queueName, ttl)
+	return fmt.Sprintf("retry_%dms", ttl)
 }
 
 func (c *Consumer) simulateProcessing() bool {
@@ -262,33 +262,19 @@ func (c *Consumer) handleSuccess(msg shared.Message, delivery amqp.Delivery, que
 	return delivery.Ack(false)
 }
 
+// abbreviatedQueueName returns a simplified version of the queue name for reporting.
 func abbreviatedQueueName(queueName string) string {
 	// Check if this is a retry queue
-	if !strings.Contains(queueName, "_retry_") {
-		return queueName // Return non-retry queues as-is
+	if strings.HasPrefix(queueName, "retry_") && strings.HasSuffix(queueName, "ms") {
+		// For shared retry queues, just extract the delay
+		// "retry_1000ms" -> "retry-1000"
+		delay := strings.TrimPrefix(queueName, "retry_")
+		delay = strings.TrimSuffix(delay, "ms")
+		return "r-" + delay
 	}
 
-	// Extract base queue name and delay
-	parts := strings.Split(queueName, "_retry_")
-	if len(parts) != 2 {
-		return queueName // Malformed, return as-is
-	}
-
-	baseQueue := parts[0]
-	delayPart := parts[1]
-
-	// Extract delay value (remove "ms" suffix)
-	delay := strings.TrimSuffix(delayPart, "ms")
-
-	// Get initials from base queue name
-	initials := ""
-	for _, word := range strings.Split(baseQueue, "-") {
-		if len(word) > 0 {
-			initials += string(word[0])
-		}
-	}
-
-	return initials + "-" + delay
+	// Return non-retry queues as-is
+	return queueName
 }
 
 func (c *Consumer) handleFailure(ctx context.Context, msg shared.Message, delivery amqp.Delivery, queueName string, timeInQueue time.Duration, retryCount int) error {
@@ -305,7 +291,7 @@ func (c *Consumer) handleFailure(ctx context.Context, msg shared.Message, delive
 
 func (c *Consumer) scheduleRetry(ctx context.Context, msg shared.Message, delivery amqp.Delivery, retryCount int) error {
 	ttl := calculateTTL(retryCount)
-	retryQueueName := fmt.Sprintf("%s_retry_%dms", c.queueName, ttl)
+	retryQueueName := fmt.Sprintf("retry_%dms", ttl)
 
 	// Create or ensure retry queue exists
 	if err := c.createRetryQueue(ttl); err != nil {
@@ -354,8 +340,8 @@ func calculateTTL(retryCount int) int {
 }
 
 func (c *Consumer) createRetryQueue(ttl int) error {
-	// Create unique retry queue names per consumer queue to avoid conflicts
-	queueName := fmt.Sprintf("%s_retry_%dms", c.queueName, ttl)
+	// Create shared retry queue name (no consumer prefix)
+	queueName := fmt.Sprintf("retry_%dms", ttl)
 
 	args := amqp.Table{
 		HeaderMessageTTL:           int32(ttl),
@@ -376,10 +362,12 @@ func (c *Consumer) createRetryQueue(ttl int) error {
 		return fmt.Errorf("failed to declare retry queue %s: %w", queueName, err)
 	}
 
-	// Bind the retry queue to retry exchange with queue-specific routing key
+	// Bind the retry queue to retry exchange with wildcard pattern to accept all consumers
+	// This allows shared retry queues to receive messages from any consumer
+	wildcardRoutingKey := fmt.Sprintf("retry.%d.*", ttl)
 	err = c.channel.QueueBind(
 		queueName,
-		c.retryQueueRoutingKey(ttl),
+		wildcardRoutingKey,
 		ExchangeNameRetry,
 		false,
 		nil,
@@ -392,5 +380,5 @@ func (c *Consumer) createRetryQueue(ttl int) error {
 }
 
 func (c *Consumer) retryQueueRoutingKey(ttl int) string {
-	return fmt.Sprintf("retry.%s.%d", c.queueName, ttl)
+	return fmt.Sprintf("retry.%d.%s", ttl, c.queueName)
 }
