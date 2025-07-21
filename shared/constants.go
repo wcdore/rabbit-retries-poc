@@ -9,6 +9,7 @@ const (
 const (
 	ExchangeNameTransaction = "TRANSACTION"
 	ExchangeTypeTopic       = "topic"
+	ExchangeTypeHeaders     = "headers"
 
 	// Queue names
 	QueueOrderLedger  = "order-ledger"

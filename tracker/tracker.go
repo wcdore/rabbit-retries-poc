@@ -83,10 +83,17 @@ func (t *Tracker) PrintReport() {
 	fmt.Println("-----------------------------------------------------------------------------------------------------------------------------------------------------")
 
 	// Iterate through messages in numerical order
-	for i := 1; i <= shared.DefaultMessageCount; i++ {
+	rowCount := len(t.journeys)
+	for i := 1; i <= rowCount; i++ {
 		journey, exists := t.journeys[i]
 		if !exists {
-			continue
+			fmt.Printf("%-10d | %-8d | %-20s | %-*s | %-30s\n",
+				journey.MessageID,
+				len(journey.Attempts),
+				"Error!",
+				QueueJourneyColumnWidth,
+				"Message not found in tracker",
+				"N/A")
 		}
 		queueJourney := ""
 		timeInQueues := ""
@@ -119,7 +126,11 @@ func (t *Tracker) PrintReport() {
 		} else if finalStatus == "failure" && len(journey.Attempts) > shared.MaxRetries {
 			finalStatus = "Failed (Max Retries)"
 		} else if finalStatus == "success" {
-			finalStatus = "Success"
+			if len(journey.Attempts) > shared.MaxRetries {
+				finalStatus = "Success (Final Attempt)"
+			} else {
+				finalStatus = "Success"
+			}
 		} else if finalStatus == "failure" {
 			finalStatus = "Failed"
 		}
